@@ -2,7 +2,7 @@
 
 Mesos runs Redis.
 
-<img src="./ui/app/mrredis_250x250.png"> 
+<img src="/ui/app/images/mrredis_250x250.png"> 
 
 A minimalistic framework for Redis workload on Apache Mesos
 
