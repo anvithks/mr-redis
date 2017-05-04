@@ -1,6 +1,7 @@
 package httplib
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"strconv"
@@ -10,110 +11,135 @@ import (
 	typ "github.com/mesos/mr-redis/common/types"
 )
 
+type InputData struct {
+	Distribution int //Distribution Value
+}
+
+//MainController of the HTTP server
 type MainController struct {
 	beego.Controller
 }
 
+//Get Handles a general Get
 func (this *MainController) Get() {
 	this.Ctx.WriteString("hello world")
 }
 
+//CreateInstance Handles a Create Instance
 func (this *MainController) CreateInstance() {
 
 	var name string
 	var capacity, masters, slaves int
+	//Create an Default INPUT data
+	IData := InputData{Distribution: 1}
 
 	//Parse the input URL
-	name = this.Ctx.Input.Param(":INSTANCENAME")                  //Get the name of the instnace
+	name = this.Ctx.Input.Param(":INSTANCENAME")                  //Get the name of the instance
 	capacity, _ = strconv.Atoi(this.Ctx.Input.Param(":CAPACITY")) // Get the capacity of the instance in MB
 	masters, _ = strconv.Atoi(this.Ctx.Input.Param(":MASTERS"))   // Get the capacity of the instance in MB
 	slaves, _ = strconv.Atoi(this.Ctx.Input.Param(":SLAVES"))     // Get the capacity of the instance in MB
+	inData := this.Ctx.Input.CopyBody()
 
-	log.Printf("Instance Name=%s, Capacity=%d, masters=%d, slaves=%d\n", name, capacity, masters, slaves)
+	if len(inData) > 0 {
+		//Some Payload is being supplied for create
+		err := json.Unmarshal(inData, &IData)
+		if err != nil {
+			log.Printf("Invalid JSON format along wtih CREATE call IGNORING")
+		}
+	}
+
+	log.Printf("Instance Name=%s, Capacity=%d, masters=%d, slaves=%d ConfigJson=%v\n", name, capacity, masters, slaves, IData)
 
 	//Check the in-memory map if the instance already exist then return
-	tmp_instance := typ.MemDb.Get(name)
-	if tmp_instance == nil {
-		tmp_instance = typ.LoadInstance(name)
+	tmpInstance := typ.MemDb.Get(name)
+	if tmpInstance == nil {
+		tmpInstance = typ.LoadInstance(name)
 	}
 
 	//Check the central storage  if the instanc already exist then return
 
-	if tmp_instance != nil {
-		typ.MemDb.Add(name, tmp_instance)
-		if tmp_instance.Status == typ.INST_STATUS_DELETED {
+	if tmpInstance != nil {
+		typ.MemDb.Add(name, tmpInstance)
+		if tmpInstance.Status == typ.INST_STATUS_DELETED {
 
+			this.Ctx.ResponseWriter.WriteHeader(201)
 			this.Ctx.WriteString(fmt.Sprintf("Instance %s already exist, but in deleted state re-creating it", name))
 		} else {
-			this.Ctx.WriteString(fmt.Sprintf("Instance %s already exist, cannot be create", name))
+			this.Ctx.WriteString(fmt.Sprintf("Instance %s already exist, cannot be created", name))
 			return
 		}
 	}
 
 	//create a instance object
-	inst_type := typ.INST_TYPE_SINGLE
+	instType := typ.INST_TYPE_SINGLE
 	if slaves > 0 {
-		inst_type = typ.INST_TYPE_MASTER_SLAVE
+		instType = typ.INST_TYPE_MASTER_SLAVE
 	}
-	tmp_instance = typ.NewInstance(name, inst_type, masters, slaves, capacity)
-	tmp_instance.Status = typ.INST_STATUS_CREATING
+	tmpInstance = typ.NewInstance(name, instType, masters, slaves, capacity)
+	tmpInstance.Status = typ.INST_STATUS_CREATING
+	tmpInstance.DistributionValue = IData.Distribution
+	tmpInstance.Sync()
 
-	tmp_instance.Sync()
-	ok, _ := typ.MemDb.Add(name, tmp_instance)
+	ok, _ := typ.MemDb.Add(name, tmpInstance)
 	if !ok {
 		//It appears that the element is already there but in deleted state so update it
-		typ.MemDb.Update(name, tmp_instance)
+		typ.MemDb.Update(name, tmpInstance)
 	}
 
 	//Send it across to creator's channel
-	typ.Cchan <- typ.CreateMaster(tmp_instance)
+	typ.Cchan <- typ.CreateMaster(tmpInstance)
 
 	//this.Ctx.Output.SetStatus(201)
 	this.Ctx.ResponseWriter.WriteHeader(201)
 	this.Ctx.WriteString("Request Accepted, Instance will be created.")
 }
 
+//DeleteInstance handles a delete instance REST call
 func (this *MainController) DeleteInstance() {
 
 	//var name string
 	var name string
 
 	//Parse the input URL
-	name = this.Ctx.Input.Param(":INSTANCENAME") //Get the name of the instnace
+	name = this.Ctx.Input.Param(":INSTANCENAME") //Get the name of the instance
 
 	//Check the in-memory map if the instance already exists
-	tmp_inst := typ.MemDb.Get(name)
-	if tmp_inst == nil {
-		tmp_inst = typ.LoadInstance(name)
+	tmpInst := typ.MemDb.Get(name)
+	if tmpInst == nil {
+		tmpInst = typ.LoadInstance(name)
 	}
-	if tmp_inst != nil {
+
+	if tmpInst != nil {
 		//get the instance data from central storage
 
-		if tmp_inst.Status == typ.INST_STATUS_DELETED {
+		if tmpInst.Status == typ.INST_STATUS_DELETED {
 			this.Ctx.ResponseWriter.WriteHeader(401)
 			this.Ctx.WriteString(fmt.Sprintf("Instance %s is already deleted", name))
 			return
 
 		}
 
-		//send info about all procs to be Destroyer
-		tmp_proc := tmp_inst.Procs[tmp_inst.Mname]
+		//send info about all procs to be Destroyer to kill the master
+		var tMsg typ.TaskMsg
+		tMsg.P = tmpInst.Procs[tmpInst.Mname]
+		tMsg.MSG = typ.TASK_MSG_DESTROY
 
-		log.Printf("Destorying master %v from Instance %v", tmp_proc.ID, tmp_inst.Name)
+		log.Printf("Destorying master %v from Instance %v", tMsg.P.ID, tmpInst.Name)
 
-		typ.Dchan <- tmp_proc
+		//Send a message to the Destroyer
+		typ.Dchan <- tMsg
 
-		for _, n := range tmp_inst.Snames {
-			tmp_proc = tmp_inst.Procs[n]
-			if tmp_proc != nil {
-				log.Printf("Destorying slave %v from Instance %v", tmp_proc.ID, tmp_inst.Name)
+		for _, n := range tmpInst.Snames {
+			tMsg.P = tmpInst.Procs[n]
+			if tMsg.P != nil {
+				log.Printf("Destorying slave %v from Instance %v", tMsg.P.ID, tmpInst.Name)
 			} else {
 				log.Printf("Destroying Proc of the slave = %v is nil ", n)
 			}
 
-			typ.Dchan <- tmp_proc
+			//Send a message to the destroyer to kill the slaves
+			typ.Dchan <- tMsg
 		}
-
 	} else {
 
 		//The instance already exist return cannot create again return error
@@ -128,6 +154,7 @@ func (this *MainController) DeleteInstance() {
 	this.Ctx.WriteString("Request Placed for destroying")
 }
 
+//Status handles a STATUS REST call
 func (this *MainController) Status() {
 
 	//var name string
@@ -135,7 +162,7 @@ func (this *MainController) Status() {
 	var inst *typ.Instance
 
 	//Parse the input URL
-	name = this.Ctx.Input.Param(":INSTANCENAME") //Get the name of the instnace
+	name = this.Ctx.Input.Param(":INSTANCENAME") //Get the name of the instance
 
 	//Check in memory map and store if the instance is available
 	inst = typ.MemDb.Get(name)
@@ -145,40 +172,51 @@ func (this *MainController) Status() {
 			this.Ctx.ResponseWriter.WriteHeader(501)
 			this.Ctx.WriteString(fmt.Sprintf("Instance %s does not exist, error", name))
 			return
-		} else {
-			typ.MemDb.Add(name, inst)
 		}
+		typ.MemDb.Add(name, inst)
 	}
-
 	//not available in both the retrun error
 	this.Ctx.WriteString(inst.ToJson())
-
 }
 
+//StatusAll handles StatusAll REST call
 func (this *MainController) StatusAll() {
 
-	//var name string
-	var statusAll string
+	var statusAll []typ.Instance_Json
+
+	if len(typ.MemDb.I) == 0 {
+		this.Ctx.WriteString("[]")
+		return
+	}
 
 	for _, inst := range typ.MemDb.I {
 		if inst.Status == typ.INST_STATUS_RUNNING {
-			statusAll = statusAll + inst.ToJson() + "\n"
+			//statusAll = statusAll + inst.ToJson() + "\n"
+			statusAll = append(statusAll, inst.ToJson_Obj())
 		}
 	}
 
 	//not available in both the retrun error
-	this.Ctx.WriteString(statusAll)
+	statusBytes, err := json.Marshal(statusAll)
+	if err != nil {
+
+		this.Ctx.WriteString("STATUSALL: Json Unmarshalling error")
+		return
+	}
+	this.Ctx.WriteString(string(statusBytes))
 
 }
+
+//UpdateMemory Not yet implemented
 func (this *MainController) UpdateMemory() {
 
 	//var name string
 	var name string
 
 	//parse the input URL
-	name = this.Ctx.Input.Param(":INSTANCENAME") //Get the name of the instnace
+	name = this.Ctx.Input.Param(":INSTANCENAME") //Get the name of the instance
 
-	//Check the instnace in in-memory
+	//Check the instance in in-memory
 	if !typ.MemDb.IsValid(name) {
 		//The instance already exist return cannot create again return error
 		this.Ctx.ResponseWriter.WriteHeader(501)
@@ -188,20 +226,21 @@ func (this *MainController) UpdateMemory() {
 
 	//Check the instance in central storage
 
-	//sedn the instnace to Maintainer channel
+	//send the instance to Maintainer channel
 	this.Ctx.WriteString("Upgrading the instance")
 
 }
 
+//UpdateSlaves Not yet implemented
 func (this *MainController) UpdateSlaves() {
 
 	//var name string
 	var name string
 
 	//parse the input URL
-	name = this.Ctx.Input.Param(":INSTANCENAME") //Get the name of the instnace
+	name = this.Ctx.Input.Param(":INSTANCENAME") //Get the name of the instance
 
-	//Check the instnace in in-memory
+	//Check the instance in in-memory
 	if typ.MemDb.IsValid(name) {
 		//The instance already exist return cannot create again return error
 		this.Ctx.WriteString(fmt.Sprintf("Instance %s already exist, cannot be create", name))
@@ -210,11 +249,12 @@ func (this *MainController) UpdateSlaves() {
 
 	//Check the instance in central storage
 
-	//sedn the instnace to Maintainer channel
+	//send the instance to Maintainer channel
 	this.Ctx.WriteString("Upgrading the instance slaves")
 
 }
 
+//Run main function that starts the HTTP server
 func Run(config string) {
 
 	log.Printf("Starting the HTTP server at port %s", config)

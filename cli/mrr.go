@@ -4,14 +4,24 @@ import (
 	"fmt"
 	"github.com/codegangsta/cli"
 	"os"
+	"runtime"
 	"strings"
 )
 
-var MrRedisFW string //Frameworks IP and Port number
+//MrRedisFW IP and Port number
+var MrRedisFW string
 
+//Init simply loads the scheduler's endpoint from the .MrRedis before performing any subcommand
 func Init() {
+	var confFilePath string
+	if runtime.GOOS == "windows" {
+		confFilePath = ".MrRedis"
+	} else {
+		confFilePath = "/tmp/.MrRedis"
+	}
+
 	//Check if we have a ~/.MrRedis config file in the system already,
-	f, err := os.Open("/tmp/.MrRedis")
+	f, err := os.Open(confFilePath)
 	if err != nil {
 		fmt.Printf("Cli is not initalized err=%v\n", err)
 		fmt.Printf("$mrr init <http://MrRedisEndPoint>\n")
@@ -67,7 +77,11 @@ func main() {
 				},
 				cli.BoolFlag{
 					Name:  "wait, w",
-					Usage: "Wait for the Instnace to be create (by default the command is async)",
+					Usage: "Wait for the Instance to be created (by default the command is async)",
+				},
+				cli.StringFlag{
+					Name:  "file, f",
+					Usage: "Location of the config file for this instance, to specify Distribution Value",
 				},
 			},
 		},

@@ -9,6 +9,7 @@ import (
 	typ "github.com/mesos/mr-redis/common/types"
 )
 
+//Creator Goroutine responsible for creating a redis instance/Proc waits on channel Cchan for any work to be done
 func Creator() {
 
 	for {
@@ -20,7 +21,7 @@ func Creator() {
 		*/
 
 		case tc := <-typ.Cchan:
-			log.Printf("Recived offer %v", tc)
+			log.Printf("Received offer %v", tc)
 			//Push back the offer in the offer list
 			inst := tc.I
 			cpu := 1
@@ -30,9 +31,9 @@ func Creator() {
 
 				for i := 0; i < tc.C; i++ {
 
-					typ.OfferList.PushBack(typ.NewOffer(inst.Name+"::"+id.NewUIIDstr(), cpu, mem, true, ""))
+					typ.OfferList.PushBack(typ.NewOffer(inst.Name, inst.Name+"::"+id.NewUIIDstr(), cpu, mem, true, "", inst.DistributionValue))
 				}
-				log.Printf("Created %d master offers for Instnace %v", tc.C, inst.Name)
+				log.Printf("Created %d master offers for Instance %v", tc.C, inst.Name)
 
 			} else {
 
@@ -43,11 +44,11 @@ func Creator() {
 
 					for i := 0; i < tc.C; i++ {
 
-						typ.OfferList.PushBack(typ.NewOffer(inst.Name+"::"+id.NewUIIDstr(), cpu, mem, false, p.IP+":"+p.Port))
+						typ.OfferList.PushBack(typ.NewOffer(inst.Name, inst.Name+"::"+id.NewUIIDstr(), cpu, mem, false, p.IP+":"+p.Port, inst.DistributionValue))
 					}
 
 				}
-				log.Printf("Created %d slave offers for Instnace %v", tc.C, inst.Name)
+				log.Printf("Created %d slave offers for Instance %v", tc.C, inst.Name)
 			}
 
 			break
